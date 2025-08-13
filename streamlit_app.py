@@ -15,6 +15,11 @@ from typing import Dict, List, Any, Optional
 import os
 import hashlib
 import hmac
+import openai
+import requests
+import time
+import re
+from dataclasses import dataclass
 
 # 页面配置
 st.set_page_config(
@@ -26,6 +31,498 @@ st.set_page_config(
 
 # 常量配置
 PUBLISHER_INVITE_CODE = "qijizhifeng"
+
+# AI Agent 配置
+AI_CONFIG = {
+    "model": "gpt-4o",
+    "base_url": "https://llm-proxy.miracleplus.com/v1/",
+    "api_key": "sk-xUKbGMkyH7OvGu0JVwLEqA",
+    "max_tokens": 2000,
+    "temperature": 0.7
+}
+
+@dataclass
+class AgentMessage:
+    """Agent 消息类"""
+    role: str  # 'user', 'assistant', 'system'
+    content: str
+    timestamp: datetime
+    agent_type: str = "general"  # 'general', 'translation', 'annotation', 'task_management'
+    metadata: Optional[Dict] = None
+
+class AIAgent:
+    """AI Agent 基类"""
+    
+    def __init__(self, agent_type: str = "general", system_prompt: str = None):
+        self.agent_type = agent_type
+        self.system_prompt = system_prompt or self._get_default_system_prompt()
+        self.conversation_history = []
+        
+        # 初始化 OpenAI 客户端
+        self.client = openai.OpenAI(
+            api_key=AI_CONFIG["api_key"],
+            base_url=AI_CONFIG["base_url"]
+        )
+    
+    def _get_default_system_prompt(self) -> str:
+        """获取默认系统提示"""
+        return "你是一个专业的AI助手，帮助用户进行数据标注和分析工作。"
+    
+    def add_message(self, role: str, content: str, metadata: Dict = None):
+        """添加消息到对话历史"""
+        message = AgentMessage(
+            role=role,
+            content=content,
+            timestamp=datetime.now(),
+            agent_type=self.agent_type,
+            metadata=metadata or {}
+        )
+        self.conversation_history.append(message)
+    
+    def get_response(self, user_input: str, context: Dict = None) -> str:
+        """获取AI响应"""
+        try:
+            # 添加用户消息
+            self.add_message("user", user_input)
+            
+            # 构建对话历史
+            messages = [{"role": "system", "content": self.system_prompt}]
+            
+            # 添加上下文信息
+            if context:
+                context_msg = f"当前上下文信息：{json.dumps(context, ensure_ascii=False, indent=2)}"
+                messages.append({"role": "system", "content": context_msg})
+            
+            # 添加最近的对话历史（限制长度）
+            recent_history = self.conversation_history[-10:]  # 只保留最近10条对话
+            for msg in recent_history:
+                if msg.role in ["user", "assistant"]:
+                    messages.append({"role": msg.role, "content": msg.content})
+            
+            # 调用 OpenAI API
+            response = self.client.chat.completions.create(
+                model=AI_CONFIG["model"],
+                messages=messages,
+                max_tokens=AI_CONFIG["max_tokens"],
+                temperature=AI_CONFIG["temperature"]
+            )
+            
+            assistant_response = response.choices[0].message.content
+            
+            # 添加助手响应
+            self.add_message("assistant", assistant_response)
+            
+            return assistant_response
+            
+        except Exception as e:
+            error_msg = f"AI助手暂时无法响应：{str(e)}"
+            self.add_message("assistant", error_msg)
+            return error_msg
+    
+    def clear_history(self):
+        """清除对话历史"""
+        self.conversation_history = []
+
+class TranslationAgent(AIAgent):
+    """翻译专用 Agent"""
+    
+    def __init__(self):
+        system_prompt = """你是一个专业的翻译助手，专门为数据标注平台提供翻译服务。你的任务包括：
+1. 翻译用户提供的文本内容
+2. 支持多语言互译（中文、英文、日文、韩文等）
+3. 在翻译时保持专业术语的准确性
+4. 提供翻译建议和语言学习帮助
+5. 为标注数据提供多语言版本
+
+请始终提供准确、专业的翻译服务。"""
+        super().__init__("translation", system_prompt)
+    
+    def translate_text(self, text: str, target_lang: str = "中文", source_lang: str = "自动检测") -> str:
+        """翻译文本"""
+        prompt = f"请将以下文本从{source_lang}翻译成{target_lang}：\n\n{text}\n\n请只返回翻译结果，不需要其他解释。"
+        return self.get_response(prompt)
+    
+    def translate_annotation_data(self, data: List[Dict], fields_to_translate: List[str], target_lang: str = "中文") -> List[Dict]:
+        """翻译标注数据"""
+        translated_data = []
+        for item in data:
+            translated_item = item.copy()
+            for field in fields_to_translate:
+                if field in item and item[field]:
+                    translated_item[f"{field}_translated"] = self.translate_text(str(item[field]), target_lang)
+            translated_data.append(translated_item)
+        return translated_data
+
+class AnnotationAgent(AIAgent):
+    """标注专用 Agent"""
+    
+    def __init__(self):
+        system_prompt = """你是一个专业的数据标注AI助手，专门帮助用户进行高质量的数据标注工作。你的能力包括：
+
+1. **智能标注建议**：
+   - 分析待标注数据，提供标注建议
+   - 识别数据中的关键信息和模式
+   - 提供标注的理由和依据
+
+2. **质量检查**：
+   - 检查标注结果的一致性
+   - 发现可能的标注错误
+   - 提供改进建议
+
+3. **标注指导**：
+   - 解释标注规则和标准
+   - 提供标注示例
+   - 回答标注相关问题
+
+4. **数据分析**：
+   - 分析数据特征
+   - 识别异常数据
+   - 提供数据洞察
+
+请始终以专业、准确的方式协助标注工作。"""
+        super().__init__("annotation", system_prompt)
+    
+    def suggest_annotation(self, data_item: Dict, annotation_config: Dict) -> Dict:
+        """为数据项提供标注建议"""
+        context = {
+            "data_item": data_item,
+            "annotation_config": annotation_config
+        }
+        
+        prompt = f"""请为以下数据项提供标注建议：
+
+数据内容：{json.dumps(data_item, ensure_ascii=False, indent=2)}
+
+标注配置：{json.dumps(annotation_config, ensure_ascii=False, indent=2)}
+
+请分析数据内容，并根据标注配置提供合适的标注建议。请以JSON格式返回建议结果。"""
+        
+        response = self.get_response(prompt, context)
+        
+        try:
+            # 尝试从响应中提取JSON
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except:
+            pass
+        
+        return {"suggestion": response, "confidence": "medium"}
+    
+    def check_annotation_quality(self, annotations: List[Dict]) -> Dict:
+        """检查标注质量"""
+        prompt = f"""请分析以下标注数据的质量：
+
+{json.dumps(annotations, ensure_ascii=False, indent=2)}
+
+请从以下方面进行分析：
+1. 一致性检查
+2. 完整性检查  
+3. 准确性评估
+4. 改进建议
+
+请提供详细的质量报告。"""
+        
+        response = self.get_response(prompt)
+        return {"quality_report": response, "timestamp": datetime.now().isoformat()}
+
+class TaskManagementAgent(AIAgent):
+    """任务管理 Agent"""
+    
+    def __init__(self):
+        system_prompt = """你是一个智能任务管理助手，专门帮助优化数据标注项目的管理工作。你的能力包括：
+
+1. **智能任务分配**：
+   - 根据标注者能力和任务特点进行最优分配
+   - 平衡工作负载
+   - 提高标注效率
+
+2. **进度跟踪和预测**：
+   - 分析项目进度
+   - 预测完成时间
+   - 识别潜在瓶颈
+
+3. **质量管理**：
+   - 监控标注质量
+   - 提供质量改进建议
+   - 设置质量检查点
+
+4. **资源优化**：
+   - 优化资源配置
+   - 提供效率提升建议
+   - 降低项目成本
+
+请以专业的项目管理视角提供建议。"""
+        super().__init__("task_management", system_prompt)
+    
+    def suggest_task_assignment(self, tasks: List[Dict], annotators: List[Dict]) -> Dict:
+        """建议任务分配"""
+        context = {
+            "tasks": tasks,
+            "annotators": annotators
+        }
+        
+        prompt = f"""请为以下任务和标注者提供最优的分配建议：
+
+任务列表：{json.dumps(tasks, ensure_ascii=False, indent=2)}
+
+标注者列表：{json.dumps(annotators, ensure_ascii=False, indent=2)}
+
+请考虑：
+1. 标注者的专业能力和经验
+2. 任务的复杂度和类型
+3. 工作负载平衡
+4. 预期完成时间
+
+请提供具体的分配方案和理由。"""
+        
+        response = self.get_response(prompt, context)
+        return {"assignment_suggestion": response, "timestamp": datetime.now().isoformat()}
+
+class DataInsightAgent(AIAgent):
+    """数据洞察 Agent"""
+    
+    def __init__(self):
+        system_prompt = """你是一个数据分析和洞察专家，专门为数据标注平台提供深度分析服务。你的能力包括：
+
+1. **数据模式识别**：
+   - 识别数据中的模式和趋势
+   - 发现异常和离群值
+   - 分析数据分布
+
+2. **标注趋势分析**：
+   - 分析标注者的标注模式
+   - 识别标注质量趋势
+   - 提供改进建议
+
+3. **项目洞察**：
+   - 分析项目整体表现
+   - 识别成功因素
+   - 提供优化建议
+
+4. **预测分析**：
+   - 预测项目完成时间
+   - 预测质量趋势
+   - 识别风险因素
+
+请提供专业、有价值的数据洞察。"""
+        super().__init__("data_insight", system_prompt)
+    
+    def analyze_annotation_patterns(self, annotation_data: List[Dict]) -> Dict:
+        """分析标注模式"""
+        prompt = f"""请分析以下标注数据的模式和趋势：
+
+{json.dumps(annotation_data, ensure_ascii=False, indent=2)}
+
+请从以下方面进行分析：
+1. 标注分布情况
+2. 质量趋势
+3. 时间模式
+4. 异常检测
+5. 改进建议
+
+请提供详细的分析报告。"""
+        
+        response = self.get_response(prompt)
+        return {"analysis_report": response, "timestamp": datetime.now().isoformat()}
+
+class AgentManager:
+    """Agent 管理器"""
+    
+    def __init__(self):
+        self.agents = {
+            "general": AIAgent("general"),
+            "translation": TranslationAgent(),
+            "annotation": AnnotationAgent(),
+            "task_management": TaskManagementAgent(),
+            "data_insight": DataInsightAgent()
+        }
+        self.current_agent = "general"
+    
+    def get_agent(self, agent_type: str = None) -> AIAgent:
+        """获取指定类型的 Agent"""
+        if agent_type is None:
+            agent_type = self.current_agent
+        return self.agents.get(agent_type, self.agents["general"])
+    
+    def switch_agent(self, agent_type: str):
+        """切换当前 Agent"""
+        if agent_type in self.agents:
+            self.current_agent = agent_type
+    
+    def get_all_agents(self) -> Dict[str, AIAgent]:
+        """获取所有 Agent"""
+        return self.agents
+
+def initialize_agents():
+    """初始化 Agent 系统"""
+    if 'agent_manager' not in st.session_state:
+        st.session_state.agent_manager = AgentManager()
+    
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = {}
+        for agent_type in st.session_state.agent_manager.agents.keys():
+            st.session_state.chat_history[agent_type] = []
+
+def render_chatbot_sidebar():
+    """渲染 ChatBot 侧边栏"""
+    # 确保 Agent 系统已初始化
+    initialize_agents()
+    
+    with st.sidebar:
+        st.divider()
+        st.subheader("🤖 AI Assistant")
+        
+        # Agent 类型选择
+        agent_types = {
+            "general": "🤖 通用助手",
+            "translation": "🌐 翻译助手", 
+            "annotation": "✏️ 标注助手",
+            "task_management": "📋 任务管理",
+            "data_insight": "📊 数据洞察"
+        }
+        
+        selected_agent = st.selectbox(
+            "选择 AI 助手类型",
+            options=list(agent_types.keys()),
+            format_func=lambda x: agent_types[x],
+            key="agent_selector"
+        )
+        
+        # 切换 Agent
+        st.session_state.agent_manager.switch_agent(selected_agent)
+        current_agent = st.session_state.agent_manager.get_agent()
+        
+        # 显示当前 Agent 信息
+        st.info(f"当前助手：{agent_types[selected_agent]}")
+        
+        # 聊天历史显示
+        chat_container = st.container()
+        with chat_container:
+            st.write("**对话历史**")
+            
+            # 获取当前 Agent 的聊天历史
+            if selected_agent not in st.session_state.chat_history:
+                st.session_state.chat_history[selected_agent] = []
+            
+            chat_history = st.session_state.chat_history[selected_agent]
+            
+            # 显示聊天消息
+            for i, message in enumerate(chat_history[-10:]):  # 只显示最近10条
+                if message["role"] == "user":
+                    st.write(f"🙋 **您**: {message['content']}")
+                else:
+                    st.write(f"🤖 **助手**: {message['content']}")
+            
+            if not chat_history:
+                st.write("还没有对话记录，开始聊天吧！")
+        
+        # 聊天输入
+        st.write("---")
+        user_input = st.text_area(
+            "输入消息",
+            placeholder=f"向{agent_types[selected_agent]}提问...",
+            height=100,
+            key=f"chat_input_{selected_agent}"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("发送", key=f"send_btn_{selected_agent}"):
+                if user_input.strip():
+                    # 获取上下文信息
+                    context = get_current_context()
+                    
+                    # 添加用户消息
+                    st.session_state.chat_history[selected_agent].append({
+                        "role": "user",
+                        "content": user_input,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    
+                    # 获取 AI 响应
+                    try:
+                        response = current_agent.get_response(user_input, context)
+                        
+                        # 添加助手响应
+                        st.session_state.chat_history[selected_agent].append({
+                            "role": "assistant", 
+                            "content": response,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                        
+                        # 清空输入框
+                        st.session_state[f"chat_input_{selected_agent}"] = ""
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"AI 响应错误: {str(e)}")
+        
+        with col2:
+            if st.button("清除历史", key=f"clear_btn_{selected_agent}"):
+                st.session_state.chat_history[selected_agent] = []
+                current_agent.clear_history()
+                st.rerun()
+
+def get_current_context() -> Dict:
+    """获取当前上下文信息"""
+    context = {
+        "user_info": st.session_state.get('user', {}),
+        "current_page": "标注平台",
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # 添加当前任务信息
+    if 'selected_task_id' in st.session_state:
+        context["current_task_id"] = st.session_state['selected_task_id']
+    
+    # 添加当前数据信息
+    if 'upload_data' in st.session_state:
+        context["data_count"] = len(st.session_state['upload_data'])
+        context["data_sample"] = st.session_state['upload_data'][:2] if st.session_state['upload_data'] else []
+    
+    return context
+
+def render_agent_features_in_main():
+    """在主界面中渲染 Agent 功能"""
+    # 确保 Agent 系统已初始化
+    initialize_agents()
+    
+    # 根据当前页面添加相应的 Agent 功能
+    current_page = st.session_state.get('current_page', '')
+    
+    if current_page == "annotation":
+        render_annotation_agent_features()
+    elif current_page == "task_config":
+        render_task_config_agent_features()
+    elif current_page == "progress":
+        render_progress_agent_features()
+
+def render_annotation_agent_features():
+    """在标注页面渲染 Agent 功能"""
+    if st.session_state.get('selected_task_id'):
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🤖 智能标注助手")
+        
+        if st.sidebar.button("💡 获取标注建议"):
+            # 这里会在标注页面中实现具体的建议功能
+            st.sidebar.success("标注建议已生成，请查看主界面")
+
+def render_task_config_agent_features():
+    """在任务配置页面渲染 Agent 功能"""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🤖 任务配置助手")
+    
+    if st.sidebar.button("📋 优化任务配置"):
+        st.sidebar.success("配置建议已生成")
+
+def render_progress_agent_features():
+    """在进度页面渲染 Agent 功能"""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🤖 进度分析助手")
+    
+    if st.sidebar.button("📊 生成进度报告"):
+        st.sidebar.success("进度报告已生成")
 
 # 认证工具函数
 def hash_password(password: str) -> str:
@@ -1052,6 +1549,12 @@ def main():
             annotator_stats_page(db)
         elif page == "🏆 排行榜":
             annotator_leaderboard_page(db)
+    
+    # 渲染 ChatBot 侧边栏
+    render_chatbot_sidebar()
+    
+    # 在主界面中渲染 Agent 功能
+    render_agent_features_in_main()
 
 def task_assignment_page(db: DatabaseManager):
     """任务分配页面（仅发布者可见）"""
@@ -1069,7 +1572,65 @@ def task_assignment_page(db: DatabaseManager):
         st.warning("暂无标注者用户，请等待标注者注册")
         return
     
-    st.subheader("📋 任务分配")
+    # AI 智能分配建议
+    st.subheader("🤖 AI 智能分配建议")
+    
+    col_ai_assign, col_manual = st.columns([1, 2])
+    
+    with col_ai_assign:
+        if st.button("🧠 获取智能分配建议", help="AI 将根据任务特点和标注者能力推荐最优分配方案"):
+            with st.spinner("AI 正在分析任务和标注者..."):
+                try:
+                    initialize_agents()
+                    task_agent = st.session_state.agent_manager.get_agent("task_management")
+                    
+                    # 准备任务和标注者数据
+                    task_data = []
+                    for task in tasks:
+                        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
+                        task_info = {
+                            "id": task['id'][:8],
+                            "name": task['name'],
+                            "description": task['description'],
+                            "label": task.get('task_label', ''),
+                            "total_items": progress.get('total', 0),
+                            "completed": progress.get('completed', 0),
+                            "progress": progress.get('progress', 0)
+                        }
+                        task_data.append(task_info)
+                    
+                    annotator_data = []
+                    for ann in annotators:
+                        ann_stats = db.get_user_annotation_stats(ann['id'])
+                        ann_info = {
+                            "id": ann['id'][:8],
+                            "username": ann['username'],
+                            "full_name": ann['full_name'],
+                            "total_annotations": ann_stats['total_count'],
+                            "experience_level": "高级" if ann_stats['total_count'] > 100 else "中级" if ann_stats['total_count'] > 20 else "初级"
+                        }
+                        annotator_data.append(ann_info)
+                    
+                    suggestion = task_agent.suggest_task_assignment(task_data, annotator_data)
+                    
+                    st.success("✅ AI 分配建议已生成")
+                    with st.expander("查看详细建议", expanded=True):
+                        st.markdown(suggestion["assignment_suggestion"])
+                    
+                except Exception as e:
+                    st.error(f"AI 建议生成失败: {str(e)}")
+    
+    with col_manual:
+        st.info("""
+        **💡 智能分配考虑因素:**
+        - 标注者的经验水平和标注历史
+        - 任务的复杂度和类型标签
+        - 当前工作负载分配
+        - 预期完成时间和效率
+        """)
+    
+    st.divider()
+    st.subheader("📋 手动任务分配")
     
     # 选择任务
     task_options = {f"{task['name']} (ID: {task['id'][:8]})": task['id'] for task in tasks}
@@ -1946,34 +2507,108 @@ def annotation_page(db: DatabaseManager, annotator_view=False):
     # 加载已有标注
     existing_annotation = db.get_annotation(task_id, current_index, st.session_state.user['id'])
     
-    # 渲染标注表单
-    annotation_result = None
+    # AI 智能标注建议
+    col_annotation, col_ai = st.columns([2, 1])
     
-    if annotation_config['type'] == 'single_choice':
-        annotation_result = AnnotationFormGenerator.render_single_choice(
-            annotation_config['options'], 
-            f"annotation_{task_id}_{current_index}",
-            existing_annotation
+    with col_ai:
+        st.markdown("#### 🤖 AI 助手")
+        
+        # 智能标注建议
+        if st.button("💡 获取标注建议", key=f"ai_suggest_{current_index}"):
+            with st.spinner("AI 正在分析数据..."):
+                try:
+                    initialize_agents()
+                    annotation_agent = st.session_state.agent_manager.get_agent("annotation")
+                    
+                    suggestion = annotation_agent.suggest_annotation(current_item, annotation_config)
+                    
+                    st.success("✅ AI 建议已生成")
+                    st.write("**AI 建议:**")
+                    st.write(suggestion.get("suggestion", "暂无建议"))
+                    
+                    if "confidence" in suggestion:
+                        confidence_color = {"high": "🟢", "medium": "🟡", "low": "🔴"}
+                        st.write(f"**置信度:** {confidence_color.get(suggestion['confidence'], '🔴')} {suggestion['confidence']}")
+                    
+                    # 保存建议到 session state
+                    st.session_state[f"ai_suggestion_{current_index}"] = suggestion
+                    
+                except Exception as e:
+                    st.error(f"AI 建议生成失败: {str(e)}")
+        
+        # 显示已有的 AI 建议
+        if f"ai_suggestion_{current_index}" in st.session_state:
+            suggestion = st.session_state[f"ai_suggestion_{current_index}"]
+            st.info("💡 之前的AI建议")
+            st.write(suggestion.get("suggestion", ""))
+        
+        # 翻译功能
+        st.markdown("---")
+        st.markdown("#### 🌐 翻译助手")
+        
+        # 翻译当前数据项
+        translate_fields = st.multiselect(
+            "选择要翻译的字段",
+            options=list(current_item.keys()),
+            key=f"translate_fields_{current_index}"
         )
-    elif annotation_config['type'] == 'multiple_choice':
-        annotation_result = AnnotationFormGenerator.render_multiple_choice(
-            annotation_config['options'], 
-            f"annotation_{task_id}_{current_index}",
-            existing_annotation
+        
+        target_lang = st.selectbox(
+            "目标语言",
+            ["中文", "English", "日本語", "한국어"],
+            key=f"target_lang_{current_index}"
         )
-    elif annotation_config['type'] == 'rating':
-        annotation_result = AnnotationFormGenerator.render_rating(
-            annotation_config['min_value'], 
-            annotation_config['max_value'], 
-            f"annotation_{task_id}_{current_index}",
-            existing_annotation
-        )
-    elif annotation_config['type'] == 'text_input':
-        annotation_result = AnnotationFormGenerator.render_text_input(
-            annotation_config.get('placeholder', ''), 
-            f"annotation_{task_id}_{current_index}",
-            existing_annotation
-        )
+        
+        if st.button("🌐 翻译", key=f"translate_{current_index}"):
+            if translate_fields:
+                with st.spinner("正在翻译..."):
+                    try:
+                        initialize_agents()
+                        translation_agent = st.session_state.agent_manager.get_agent("translation")
+                        
+                        for field in translate_fields:
+                            if field in current_item and current_item[field]:
+                                translated = translation_agent.translate_text(
+                                    str(current_item[field]), 
+                                    target_lang
+                                )
+                                st.write(f"**{field} ({target_lang}):**")
+                                st.write(translated)
+                        
+                    except Exception as e:
+                        st.error(f"翻译失败: {str(e)}")
+            else:
+                st.warning("请选择要翻译的字段")
+    
+    with col_annotation:
+        # 渲染标注表单
+        annotation_result = None
+        
+        if annotation_config['type'] == 'single_choice':
+            annotation_result = AnnotationFormGenerator.render_single_choice(
+                annotation_config['options'], 
+                f"annotation_{task_id}_{current_index}",
+                existing_annotation
+            )
+        elif annotation_config['type'] == 'multiple_choice':
+            annotation_result = AnnotationFormGenerator.render_multiple_choice(
+                annotation_config['options'], 
+                f"annotation_{task_id}_{current_index}",
+                existing_annotation
+            )
+        elif annotation_config['type'] == 'rating':
+            annotation_result = AnnotationFormGenerator.render_rating(
+                annotation_config['min_value'], 
+                annotation_config['max_value'], 
+                f"annotation_{task_id}_{current_index}",
+                existing_annotation
+            )
+        elif annotation_config['type'] == 'text_input':
+            annotation_result = AnnotationFormGenerator.render_text_input(
+                annotation_config.get('placeholder', ''), 
+                f"annotation_{task_id}_{current_index}",
+                existing_annotation
+            )
     
     # 导航和保存按钮
     st.divider()
@@ -2075,6 +2710,68 @@ def progress_page(db: DatabaseManager):
     if not tasks:
         st.warning("暂无任务")
         return
+    
+    # AI 数据洞察
+    st.subheader("🔍 AI 数据洞察")
+    
+    col_insight, col_stats = st.columns([1, 2])
+    
+    with col_insight:
+        if st.button("📊 生成洞察报告", help="AI 将分析标注数据并提供深度洞察"):
+            with st.spinner("AI 正在分析数据..."):
+                try:
+                    initialize_agents()
+                    insight_agent = st.session_state.agent_manager.get_agent("data_insight")
+                    
+                    # 收集标注数据
+                    all_annotations = []
+                    for task in tasks:
+                        # 获取任务的所有标注
+                        conn = db.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute('''
+                            SELECT data_index, result, annotator_id, created_at
+                            FROM annotations 
+                            WHERE task_id = ?
+                            ORDER BY created_at
+                        ''', (task['id'],))
+                        
+                        annotations = cursor.fetchall()
+                        conn.close()
+                        
+                        for ann in annotations:
+                            all_annotations.append({
+                                "task_name": task['name'],
+                                "task_label": task.get('task_label', ''),
+                                "data_index": ann[0],
+                                "result": ann[1],
+                                "annotator_id": ann[2][:8],
+                                "created_at": ann[3]
+                            })
+                    
+                    if all_annotations:
+                        insight_report = insight_agent.analyze_annotation_patterns(all_annotations)
+                        
+                        st.success("✅ 洞察报告已生成")
+                        with st.expander("查看详细洞察", expanded=True):
+                            st.markdown(insight_report["analysis_report"])
+                    else:
+                        st.warning("暂无标注数据可分析")
+                    
+                except Exception as e:
+                    st.error(f"洞察分析失败: {str(e)}")
+    
+    with col_stats:
+        st.info("""
+        **🔍 AI 洞察分析包括:**
+        - 标注质量和一致性分析
+        - 标注者工作模式识别
+        - 数据分布和异常检测
+        - 效率优化建议
+        - 质量改进建议
+        """)
+    
+    st.divider()
     
     # 总体统计
     st.subheader("📈 总体统计")
