@@ -182,7 +182,11 @@ def init_database():
             config TEXT,
             status TEXT DEFAULT 'created',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            data_path TEXT
+            data_path TEXT,
+            task_label TEXT,
+            parent_task_id TEXT,
+            split_index INTEGER DEFAULT 0,
+            total_splits INTEGER DEFAULT 1
         )
     ''')
     
@@ -200,6 +204,27 @@ def init_database():
             FOREIGN KEY (task_id) REFERENCES tasks (id)
         )
     ''')
+    
+    # 检查并添加tasks表的新列
+    try:
+        cursor.execute("SELECT task_label FROM tasks LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN task_label TEXT")
+    
+    try:
+        cursor.execute("SELECT parent_task_id FROM tasks LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN parent_task_id TEXT")
+    
+    try:
+        cursor.execute("SELECT split_index FROM tasks LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN split_index INTEGER DEFAULT 0")
+    
+    try:
+        cursor.execute("SELECT total_splits FROM tasks LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE tasks ADD COLUMN total_splits INTEGER DEFAULT 1")
     
     # 创建用户表 - 先检查是否已存在
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
@@ -285,14 +310,18 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT INTO tasks (id, name, description, config, data_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO tasks (id, name, description, config, data_path, task_label, parent_task_id, split_index, total_splits)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             task_id,
             task_data['name'],
             task_data.get('description', ''),
             json.dumps(task_data.get('config', {})),
-            task_data.get('data_path', '')
+            task_data.get('data_path', ''),
+            task_data.get('task_label', ''),
+            task_data.get('parent_task_id', None),
+            task_data.get('split_index', 0),
+            task_data.get('total_splits', 1)
         ))
         
         conn.commit()
@@ -316,7 +345,11 @@ class DatabaseManager:
                 'config': json.loads(row[3]) if row[3] else {},
                 'status': row[4],
                 'created_at': row[5],
-                'data_path': row[6]
+                'data_path': row[6],
+                'task_label': row[7] if len(row) > 7 else None,
+                'parent_task_id': row[8] if len(row) > 8 else None,
+                'split_index': row[9] if len(row) > 9 else 0,
+                'total_splits': row[10] if len(row) > 10 else 1
             }
         return None
     
@@ -338,11 +371,15 @@ class DatabaseManager:
                 'config': json.loads(row[3]) if row[3] else {},
                 'status': row[4],
                 'created_at': row[5],
-                'data_path': row[6]
+                'data_path': row[6],
+                'task_label': row[7] if len(row) > 7 else None,
+                'parent_task_id': row[8] if len(row) > 8 else None,
+                'split_index': row[9] if len(row) > 9 else 0,
+                'total_splits': row[10] if len(row) > 10 else 1
             })
         return tasks
     
-    def save_annotation(self, task_id: str, data_index: int, result: Any):
+    def save_annotation(self, task_id: str, data_index: int, result: Any, annotator_id: str = 'user1'):
         """保存标注结果"""
         annotation_id = str(uuid.uuid4())
         conn = self.get_connection()
@@ -352,7 +389,7 @@ class DatabaseManager:
         cursor.execute('''
             SELECT id FROM annotations 
             WHERE task_id = ? AND data_index = ? AND annotator_id = ?
-        ''', (task_id, data_index, 'user1'))
+        ''', (task_id, data_index, annotator_id))
         
         existing = cursor.fetchone()
         
@@ -362,18 +399,18 @@ class DatabaseManager:
                 UPDATE annotations 
                 SET result = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE task_id = ? AND data_index = ? AND annotator_id = ?
-            ''', (json.dumps(result), task_id, data_index, 'user1'))
+            ''', (json.dumps(result), task_id, data_index, annotator_id))
         else:
             # 创建新标注
             cursor.execute('''
                 INSERT INTO annotations (id, task_id, data_index, result, annotator_id)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (annotation_id, task_id, data_index, json.dumps(result), 'user1'))
+            ''', (annotation_id, task_id, data_index, json.dumps(result), annotator_id))
         
         conn.commit()
         conn.close()
     
-    def get_annotation(self, task_id: str, data_index: int) -> Optional[Dict]:
+    def get_annotation(self, task_id: str, data_index: int, annotator_id: str = 'user1') -> Optional[Dict]:
         """获取标注结果"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -381,7 +418,7 @@ class DatabaseManager:
         cursor.execute('''
             SELECT result FROM annotations 
             WHERE task_id = ? AND data_index = ? AND annotator_id = ?
-        ''', (task_id, data_index, 'user1'))
+        ''', (task_id, data_index, annotator_id))
         
         row = cursor.fetchone()
         conn.close()
@@ -390,7 +427,7 @@ class DatabaseManager:
             return json.loads(row[0])
         return None
     
-    def get_task_progress(self, task_id: str) -> Dict:
+    def get_task_progress(self, task_id: str, annotator_id: str = 'user1') -> Dict:
         """获取任务进度"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -410,7 +447,7 @@ class DatabaseManager:
         cursor.execute('''
             SELECT data_index FROM annotations 
             WHERE task_id = ? AND annotator_id = ?
-        ''', (task_id, 'user1'))
+        ''', (task_id, annotator_id))
         
         saved_indices = set(row[0] for row in cursor.fetchall())
         completed = len(saved_indices)
@@ -430,7 +467,7 @@ class DatabaseManager:
             'unsaved_indices': unsaved_indices
         }
     
-    def is_annotation_saved(self, task_id: str, data_index: int) -> bool:
+    def is_annotation_saved(self, task_id: str, data_index: int, annotator_id: str = 'user1') -> bool:
         """检查指定数据是否已保存标注"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -438,7 +475,7 @@ class DatabaseManager:
         cursor.execute('''
             SELECT id FROM annotations 
             WHERE task_id = ? AND data_index = ? AND annotator_id = ?
-        ''', (task_id, data_index, 'user1'))
+        ''', (task_id, data_index, annotator_id))
         
         result = cursor.fetchone() is not None
         conn.close()
@@ -645,6 +682,146 @@ class DatabaseManager:
                 'assigned_at': row[5]
             })
         return tasks
+    
+    def get_user_annotation_count(self, user_id: str) -> int:
+        """获取用户的标注总数"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM annotations 
+            WHERE annotator_id = ?
+        ''', (user_id,))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    
+    def get_user_annotation_stats(self, user_id: str) -> Dict:
+        """获取用户标注详细统计"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # 总标注数
+        cursor.execute('''
+            SELECT COUNT(*) FROM annotations 
+            WHERE annotator_id = ?
+        ''', (user_id,))
+        total_count = cursor.fetchone()[0]
+        
+        # 按任务分组的标注数
+        cursor.execute('''
+            SELECT t.name, COUNT(a.id) as count
+            FROM annotations a
+            JOIN tasks t ON a.task_id = t.id
+            WHERE a.annotator_id = ?
+            GROUP BY a.task_id, t.name
+            ORDER BY count DESC
+        ''', (user_id,))
+        task_stats = cursor.fetchall()
+        
+        # 最近7天的标注数
+        cursor.execute('''
+            SELECT DATE(created_at) as date, COUNT(*) as count
+            FROM annotations 
+            WHERE annotator_id = ? AND created_at >= date('now', '-7 days')
+            GROUP BY DATE(created_at)
+            ORDER BY date DESC
+        ''', (user_id,))
+        recent_stats = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            'total_count': total_count,
+            'task_stats': [{'task_name': row[0], 'count': row[1]} for row in task_stats],
+            'recent_stats': [{'date': row[0], 'count': row[1]} for row in recent_stats]
+        }
+    
+    def get_annotator_leaderboard(self, limit: int = 10) -> List[Dict]:
+        """获取标注者排行榜"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT u.username, u.full_name, COUNT(a.id) as annotation_count,
+                   MIN(a.created_at) as first_annotation,
+                   MAX(a.created_at) as last_annotation
+            FROM users u
+            LEFT JOIN annotations a ON u.id = a.annotator_id
+            WHERE u.role = 'annotator'
+            GROUP BY u.id, u.username, u.full_name
+            HAVING annotation_count > 0
+            ORDER BY annotation_count DESC
+            LIMIT ?
+        ''', (limit,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        leaderboard = []
+        for i, row in enumerate(rows, 1):
+            leaderboard.append({
+                'rank': i,
+                'username': row[0],
+                'full_name': row[1],
+                'annotation_count': row[2],
+                'first_annotation': row[3],
+                'last_annotation': row[4]
+            })
+        
+        return leaderboard
+    
+    def create_split_tasks(self, original_task_data: Dict, data: List[Dict], num_splits: int) -> List[str]:
+        """将任务拆分成多个子任务"""
+        if num_splits <= 1:
+            # 不拆分，直接创建原任务
+            return [self.create_task(original_task_data)]
+        
+        total_items = len(data)
+        base_size = total_items // num_splits
+        remainder = total_items % num_splits
+        
+        split_task_ids = []
+        start_index = 0
+        
+        # 为拆分任务生成一个共同的父任务ID
+        parent_id = str(uuid.uuid4()) if num_splits > 1 else None
+        
+        for split_idx in range(num_splits):
+            # 计算当前拆分的大小
+            current_size = base_size + (1 if split_idx < remainder else 0)
+            end_index = start_index + current_size
+            
+            # 获取当前拆分的数据
+            split_data = data[start_index:end_index]
+            
+            # 创建拆分任务的数据文件
+            split_filename = f"split_{split_idx + 1}_of_{num_splits}_{original_task_data['name']}.jsonl"
+            split_filepath = f"data/splits/{split_filename}"
+            
+            # 确保目录存在
+            os.makedirs(os.path.dirname(split_filepath), exist_ok=True)
+            
+            # 保存拆分的数据
+            FileProcessor.save_jsonl(split_data, split_filepath)
+            
+            # 创建拆分任务的元数据
+            split_task_data = original_task_data.copy()
+            split_task_data['name'] = f"{original_task_data['name']} (第{split_idx + 1}部分)"
+            split_task_data['description'] = f"{original_task_data.get('description', '')} - 拆分任务 {split_idx + 1}/{num_splits}"
+            split_task_data['data_path'] = split_filepath
+            split_task_data['split_index'] = split_idx
+            split_task_data['total_splits'] = num_splits
+            split_task_data['parent_task_id'] = parent_id
+            
+            # 创建拆分任务
+            task_id = self.create_task(split_task_data)
+            split_task_ids.append(task_id)
+            
+            start_index = end_index
+        
+        return split_task_ids
 
 # 文件处理类
 class FileProcessor:
@@ -816,10 +993,22 @@ def main():
     # 根据用户角色显示不同的导航选项
     if user['role'] == 'publisher':
         # 发布者界面
+        default_index = 0
+        page_options = ["🏠 首页", "⚙️ 任务配置", "📝 数据标注", "📊 进度管理", "📤 结果导出", "👥 任务分配"]
+        
+        # 如果session state中有指定的页面，设置为默认选择
+        if 'page' in st.session_state and st.session_state['page'] in page_options:
+            default_index = page_options.index(st.session_state['page'])
+        
         page = st.sidebar.selectbox(
             "选择功能",
-            ["🏠 首页", "⚙️ 任务配置", "📝 数据标注", "📊 进度管理", "📤 结果导出", "👥 任务分配"]
+            page_options,
+            index=default_index
         )
+        
+        # 清除页面状态（如果用户手动选择了不同的页面）
+        if 'page' in st.session_state and st.session_state['page'] != page:
+            del st.session_state['page']
         
         if page == "🏠 首页":
             home_page(db)
@@ -836,10 +1025,22 @@ def main():
     
     else:
         # 标注者界面（只能看到分配给自己的任务）
+        default_index = 0
+        page_options = ["🏠 我的任务", "📝 数据标注", "📊 我的进度", "📈 我的统计", "🏆 排行榜"]
+        
+        # 如果session state中有指定的页面，设置为默认选择
+        if 'page' in st.session_state and st.session_state['page'] in page_options:
+            default_index = page_options.index(st.session_state['page'])
+        
         page = st.sidebar.selectbox(
             "选择功能",
-            ["🏠 我的任务", "📝 数据标注", "📊 我的进度"]
+            page_options,
+            index=default_index
         )
+        
+        # 清除页面状态（如果用户手动选择了不同的页面）
+        if 'page' in st.session_state and st.session_state['page'] != page:
+            del st.session_state['page']
         
         if page == "🏠 我的任务":
             annotator_home_page(db)
@@ -847,6 +1048,10 @@ def main():
             annotation_page(db, annotator_view=True)
         elif page == "📊 我的进度":
             annotator_progress_page(db)
+        elif page == "📈 我的统计":
+            annotator_stats_page(db)
+        elif page == "🏆 排行榜":
+            annotator_leaderboard_page(db)
 
 def task_assignment_page(db: DatabaseManager):
     """任务分配页面（仅发布者可见）"""
@@ -917,14 +1122,27 @@ def task_assignment_page(db: DatabaseManager):
     
     for task in tasks:
         assignment = db.get_task_assignment(task['id'])
-        progress = db.get_task_progress(task['id'])
+        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
         
-        with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
+        # 构建任务标题
+        title = f"📝 {task['name']}"
+        if task.get('task_label'):
+            label_emoji = {"SQL": "🗃️", "数学": "🔢", "DeepResearch": "🔬"}.get(task['task_label'], "🏷️")
+            title += f" {label_emoji}{task['task_label']}"
+        if task.get('total_splits', 1) > 1:
+            title += f" (第{task.get('split_index', 0) + 1}部分)"
+        title += f" - {progress['progress']:.1f}% 完成"
+        
+        with st.expander(title):
             col1, col2 = st.columns([2, 1])
             
             with col1:
                 st.write(f"**描述**: {task['description']}")
                 st.write(f"**创建时间**: {task['created_at']}")
+                if task.get('task_label'):
+                    st.write(f"**标签**: {task['task_label']}")
+                if task.get('total_splits', 1) > 1:
+                    st.write(f"**拆分信息**: 第{task.get('split_index', 0) + 1}部分，共{task['total_splits']}部分")
                 st.write(f"**数据量**: {progress['total']} 条")
                 st.write(f"**完成情况**: {progress['completed']}/{progress['total']} ({progress['progress']:.1f}%)")
                 
@@ -952,7 +1170,7 @@ def annotator_home_page(db: DatabaseManager):
     st.write(f"您共有 **{len(assigned_tasks)}** 个分配的任务")
     
     for task in assigned_tasks:
-        progress = db.get_task_progress(task['id'])
+        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
         
         with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
             col1, col2 = st.columns([3, 1])
@@ -974,7 +1192,8 @@ def annotator_home_page(db: DatabaseManager):
                 
                 if st.button(f"📝 开始标注", key=f"start_{task['id']}"):
                     st.session_state['selected_task_id'] = task['id']
-                    st.switch_page("annotation")
+                    st.session_state['page'] = "📝 数据标注"
+                    st.rerun()
 
 def annotator_progress_page(db: DatabaseManager):
     """标注者进度页面"""
@@ -994,7 +1213,7 @@ def annotator_progress_page(db: DatabaseManager):
     completed_items = 0
     
     for task in assigned_tasks:
-        progress = db.get_task_progress(task['id'])
+        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
         total_items += progress['total']
         completed_items += progress['completed']
         if progress['progress'] >= 100:
@@ -1022,7 +1241,7 @@ def annotator_progress_page(db: DatabaseManager):
     st.subheader("📋 详细任务进度")
     
     for task in assigned_tasks:
-        progress = db.get_task_progress(task['id'])
+        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
         
         with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
             st.write(f"**描述**: {task['description']}")
@@ -1098,7 +1317,7 @@ def home_page(db: DatabaseManager):
                 st.write(f"**描述**: {task['description']}")
                 st.write(f"**创建时间**: {task['created_at']}")
                 
-                progress = db.get_task_progress(task['id'])
+                progress = db.get_task_progress(task['id'], st.session_state.user['id'])
                 if progress['total'] > 0:
                     st.progress(progress['progress'] / 100)
                     st.write(f"进度: {progress['completed']}/{progress['total']} ({progress['progress']:.1f}%)")
@@ -1446,11 +1665,61 @@ def confirm_task_step(db: DatabaseManager):
         help="详细描述这个任务的背景和目标"
     )
     
+    # 任务标签选择
+    st.write("**任务标签**:")
+    task_label = st.selectbox(
+        "选择任务类型",
+        options=["", "SQL", "数学", "DeepResearch"],
+        help="为任务选择一个标签来标识数据类型"
+    )
+    
+    # 任务拆分选项
+    st.write("**任务拆分**:")
+    col_split1, col_split2 = st.columns(2)
+    
+    with col_split1:
+        enable_split = st.checkbox("启用任务拆分", help="将任务数据拆分成多个独立的子任务")
+    
+    with col_split2:
+        num_splits = 1
+        if enable_split:
+            data_count = len(st.session_state.get('upload_data', []))
+            max_splits = min(data_count, 10)  # 最多拆分成10个子任务
+            num_splits = st.number_input(
+                "拆分数量", 
+                min_value=2, 
+                max_value=max_splits, 
+                value=2,
+                help=f"将 {data_count} 条数据拆分成几个子任务"
+            )
+            
+            # 显示拆分预览
+            if num_splits > 1:
+                base_size = data_count // num_splits
+                remainder = data_count % num_splits
+                
+                st.write("**拆分预览**:")
+                for i in range(num_splits):
+                    size = base_size + (1 if i < remainder else 0)
+                    st.write(f"  • 第{i+1}部分: {size} 条数据")
+    
+    # 存储新的配置到session state
+    st.session_state['task_label'] = task_label
+    st.session_state['num_splits'] = num_splits if enable_split else 1
+    
     # 配置摘要
     st.subheader("📋 配置摘要")
     
     if 'upload_data' in st.session_state:
-        st.write(f"**数据量**: {len(st.session_state['upload_data'])} 条")
+        total_data = len(st.session_state['upload_data'])
+        st.write(f"**数据量**: {total_data} 条")
+        
+        # 显示拆分信息
+        if st.session_state.get('num_splits', 1) > 1:
+            st.write(f"**拆分设置**: 拆分成 {st.session_state['num_splits']} 个子任务")
+    
+    if task_label:
+        st.write(f"**任务标签**: {task_label}")
     
     if 'selected_fields' in st.session_state:
         st.write(f"**显示字段**: {', '.join(st.session_state['selected_fields'])}")
@@ -1485,43 +1754,65 @@ def confirm_task_step(db: DatabaseManager):
                 return
             
             try:
-                # 保存数据文件
-                data_filename = f"task_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-                data_path = os.path.join('data', data_filename)
-                
-                # 创建data目录
-                os.makedirs('data', exist_ok=True)
-                
-                FileProcessor.save_jsonl(st.session_state['upload_data'], data_path)
-                
-                # 创建任务
+                # 准备任务数据
                 task_data = {
                     'name': task_name,
                     'description': task_description,
+                    'task_label': task_label,
                     'config': {
                         'field_configs': st.session_state['field_configs'],
                         'selected_fields': st.session_state['selected_fields'],
                         'annotation_config': st.session_state['annotation_config'],
                         'base_path': st.session_state.get('base_path', ''),
                         'total_items': len(st.session_state['upload_data'])
-                    },
-                    'data_path': data_path
+                    }
                 }
                 
-                task_id = db.create_task(task_data)
+                upload_data = st.session_state['upload_data']
+                num_splits = st.session_state.get('num_splits', 1)
                 
-                st.success(f"✅ 任务创建成功！任务ID: {task_id}")
+                if num_splits <= 1:
+                    # 不拆分，创建单个任务
+                    data_filename = f"task_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+                    data_path = os.path.join('data', data_filename)
+                    
+                    # 创建data目录
+                    os.makedirs('data', exist_ok=True)
+                    
+                    FileProcessor.save_jsonl(upload_data, data_path)
+                    task_data['data_path'] = data_path
+                    
+                    task_id = db.create_task(task_data)
+                    st.success(f"✅ 任务创建成功！任务ID: {task_id}")
+                    
+                else:
+                    # 使用拆分功能创建多个任务
+                    task_ids = db.create_split_tasks(task_data, upload_data, num_splits)
+                    
+                    st.success(f"✅ 任务拆分成功！创建了 {len(task_ids)} 个子任务")
+                    
+                    # 显示拆分结果
+                    st.write("**创建的子任务:**")
+                    for i, task_id in enumerate(task_ids, 1):
+                        st.write(f"  • 第{i}部分: {task_id}")
+                    
+                    st.info(f"🔍 共拆分为 {num_splits} 个子任务，每个任务可以独立分配给不同的标注者")
                 
                 # 清理session state
-                for key in ['upload_data', 'field_configs', 'selected_fields', 'annotation_config', 'config_step', 'base_path']:
+                for key in ['upload_data', 'field_configs', 'selected_fields', 'annotation_config', 'config_step', 'base_path', 'task_label', 'num_splits']:
                     if key in st.session_state:
                         del st.session_state[key]
                 
                 st.balloons()
                 
-                if st.button("开始标注"):
-                    st.session_state['selected_task_id'] = task_id
-                    st.switch_page("pages/annotation.py")
+                # 只在创建单个任务时显示开始标注按钮
+                if num_splits <= 1:
+                    if st.button("开始标注"):
+                        st.session_state['selected_task_id'] = task_id
+                        st.session_state['page'] = "📝 数据标注"
+                        st.rerun()
+                else:
+                    st.info("💡 拆分任务已创建完成，您可以在任务分配页面为每个子任务分配标注者")
                 
             except Exception as e:
                 st.error(f"创建任务失败: {str(e)}")
@@ -1586,8 +1877,8 @@ def annotation_page(db: DatabaseManager, annotator_view=False):
     total_items = len(data)
     
     # 进度显示
-    progress = db.get_task_progress(task_id)
-    is_current_saved = db.is_annotation_saved(task_id, current_index)
+    progress = db.get_task_progress(task_id, st.session_state.user['id'])
+    is_current_saved = db.is_annotation_saved(task_id, current_index, st.session_state.user['id'])
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1653,7 +1944,7 @@ def annotation_page(db: DatabaseManager, annotator_view=False):
     st.subheader("✏️ 标注内容")
     
     # 加载已有标注
-    existing_annotation = db.get_annotation(task_id, current_index)
+    existing_annotation = db.get_annotation(task_id, current_index, st.session_state.user['id'])
     
     # 渲染标注表单
     annotation_result = None
@@ -1698,7 +1989,7 @@ def annotation_page(db: DatabaseManager, annotator_view=False):
         save_button = st.button("💾 保存标注", type="primary")
         if save_button:
             try:
-                db.save_annotation(task_id, current_index, annotation_result)
+                db.save_annotation(task_id, current_index, annotation_result, st.session_state.user['id'])
                 # 使用session state来显示保存成功消息
                 st.session_state[f'save_message_{task_id}_{current_index}'] = {
                     'type': 'success',
@@ -1807,7 +2098,7 @@ def progress_page(db: DatabaseManager):
     st.subheader("📋 任务详细进度")
     
     for task in tasks:
-        progress = db.get_task_progress(task['id'])
+        progress = db.get_task_progress(task['id'], st.session_state.user['id'])
         assignment = db.get_task_assignment(task['id'])
         
         # 标题包含分配信息
@@ -1884,7 +2175,7 @@ def export_page(db: DatabaseManager):
     task = db.get_task(task_id)
     
     # 显示任务信息
-    progress = db.get_task_progress(task_id)
+    progress = db.get_task_progress(task_id, st.session_state.user['id'])
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1936,7 +2227,7 @@ def export_page(db: DatabaseManager):
             SELECT data_index, result FROM annotations 
             WHERE task_id = ? AND annotator_id = ?
             ORDER BY data_index
-        ''', (task_id, 'user1'))
+        ''', (task_id, st.session_state.user['id']))
         
         annotations = {row[0]: json.loads(row[1]) for row in cursor.fetchall()}
         conn.close()
@@ -2029,6 +2320,178 @@ def export_page(db: DatabaseManager):
     
     except Exception as e:
         st.error(f"导出失败: {str(e)}")
+
+def annotator_stats_page(db: DatabaseManager):
+    """标注者个人统计页面"""
+    st.title("📈 我的标注统计")
+    
+    user = st.session_state.user
+    user_id = user['id']
+    
+    # 获取用户统计信息
+    stats = db.get_user_annotation_stats(user_id)
+    
+    # 总统计信息
+    st.subheader("📊 总体统计")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("总标注数", stats['total_count'])
+    with col2:
+        if stats['recent_stats']:
+            recent_total = sum(item['count'] for item in stats['recent_stats'])
+            st.metric("最近7天", recent_total)
+        else:
+            st.metric("最近7天", 0)
+    with col3:
+        if stats['recent_stats']:
+            avg_daily = sum(item['count'] for item in stats['recent_stats']) / 7
+            st.metric("日均标注", f"{avg_daily:.1f}")
+        else:
+            st.metric("日均标注", "0.0")
+    
+    st.divider()
+    
+    # 按任务分组的统计
+    if stats['task_stats']:
+        st.subheader("📋 按任务统计")
+        
+        # 创建任务统计图表
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        task_names = [item['task_name'] for item in stats['task_stats'][:10]]  # 只显示前10个
+        task_counts = [item['count'] for item in stats['task_stats'][:10]]
+        
+        # 使用 streamlit 内置的图表
+        chart_data = pd.DataFrame({
+            '任务名称': task_names,
+            '标注数量': task_counts
+        })
+        
+        st.bar_chart(chart_data.set_index('任务名称'))
+        
+        # 详细表格
+        st.write("**详细信息:**")
+        for i, item in enumerate(stats['task_stats'], 1):
+            cols = st.columns([1, 3, 1])
+            with cols[0]:
+                st.write(f"#{i}")
+            with cols[1]:
+                st.write(item['task_name'])
+            with cols[2]:
+                st.write(f"{item['count']} 条")
+    else:
+        st.info("🔍 您还没有完成任何标注，快去开始标注吧！")
+    
+    st.divider()
+    
+    # 最近7天的活动
+    if stats['recent_stats']:
+        st.subheader("📅 最近7天活动")
+        
+        # 创建日期图表
+        dates = [item['date'] for item in stats['recent_stats']]
+        counts = [item['count'] for item in stats['recent_stats']]
+        
+        chart_data = pd.DataFrame({
+            '日期': dates,
+            '标注数量': counts
+        })
+        
+        st.line_chart(chart_data.set_index('日期'))
+        
+        # 详细信息
+        st.write("**每日详情:**")
+        for item in stats['recent_stats']:
+            st.write(f"• {item['date']}: {item['count']} 条标注")
+    else:
+        st.info("📅 最近7天没有标注活动")
+
+def annotator_leaderboard_page(db: DatabaseManager):
+    """标注者排行榜页面"""
+    st.title("🏆 标注者排行榜")
+    
+    # 获取排行榜数据
+    leaderboard = db.get_annotator_leaderboard(limit=10)
+    
+    if not leaderboard:
+        st.info("🔍 暂无标注者数据，等待标注者开始工作...")
+        return
+    
+    st.subheader("🥇 Top 10 标注者")
+    st.write("根据总标注数量排名")
+    
+    # 当前用户的信息
+    current_user_id = st.session_state.user['id']
+    current_user_count = db.get_user_annotation_count(current_user_id)
+    current_user_rank = None
+    
+    # 查找当前用户排名
+    for item in leaderboard:
+        if item['username'] == st.session_state.user['username']:
+            current_user_rank = item['rank']
+            break
+    
+    # 显示当前用户状态
+    if current_user_rank:
+        st.success(f"🎉 您当前排名第 **{current_user_rank}** 位，共标注了 **{current_user_count}** 条数据！")
+    else:
+        if current_user_count > 0:
+            st.info(f"📊 您已标注 **{current_user_count}** 条数据，继续加油进入前10！")
+        else:
+            st.info("🚀 开始您的第一个标注任务，冲击排行榜吧！")
+    
+    st.divider()
+    
+    # 排行榜表格
+    for i, item in enumerate(leaderboard):
+        # 根据排名选择emoji
+        if item['rank'] == 1:
+            rank_emoji = "🥇"
+        elif item['rank'] == 2:
+            rank_emoji = "🥈"
+        elif item['rank'] == 3:
+            rank_emoji = "🥉"
+        else:
+            rank_emoji = f"#{item['rank']}"
+        
+        # 高亮当前用户
+        is_current_user = item['username'] == st.session_state.user['username']
+        
+        with st.container():
+            if is_current_user:
+                st.markdown(f"""
+                <div style="background-color: #e8f4fd; padding: 10px; border-radius: 5px; border-left: 4px solid #1f77b4;">
+                    <h4>{rank_emoji} {item['full_name'] or item['username']} <span style="color: #1f77b4;">(您)</span></h4>
+                    <p><strong>{item['annotation_count']}</strong> 条标注</p>
+                    <p style="font-size: 0.8em; color: #666;">
+                        首次标注: {item['first_annotation'].split()[0] if item['first_annotation'] else 'N/A'} | 
+                        最新标注: {item['last_annotation'].split()[0] if item['last_annotation'] else 'N/A'}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                cols = st.columns([1, 3, 2, 3])
+                with cols[0]:
+                    st.write(f"**{rank_emoji}**")
+                with cols[1]:
+                    st.write(f"**{item['full_name'] or item['username']}**")
+                with cols[2]:
+                    st.write(f"**{item['annotation_count']}** 条")
+                with cols[3]:
+                    st.write(f"最新: {item['last_annotation'].split()[0] if item['last_annotation'] else 'N/A'}")
+    
+    st.divider()
+    
+    # 鼓励信息
+    if current_user_rank and current_user_rank <= 3:
+        st.balloons()
+        st.success("🎊 恭喜您位列前三名！您是优秀的标注者！")
+    elif current_user_rank:
+        st.info("💪 继续加油，您可以冲击更高的排名！")
+    else:
+        st.info("🎯 开始标注任务，您也可以登上排行榜！")
 
 if __name__ == "__main__":
     main()
