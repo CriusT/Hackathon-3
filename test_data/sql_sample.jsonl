@@ -1,0 +1,10 @@
+{"question": "查询所有用户的姓名和邮箱", "sql": "SELECT name, email FROM users;", "result": "name1,email1@example.com\nname2,email2@example.com\nname3,email3@example.com"}
+{"question": "查询年龄大于25岁的用户数量", "sql": "SELECT COUNT(*) as count FROM users WHERE age > 25;", "result": "count\n15"}
+{"question": "查询每个部门的平均工资", "sql": "SELECT department, AVG(salary) as avg_salary FROM employees GROUP BY department;", "result": "department,avg_salary\nIT,75000\nHR,55000\nSales,62000"}
+{"question": "查询最近一周的订单总金额", "sql": "SELECT SUM(amount) as total FROM orders WHERE order_date >= DATE_SUB(NOW(), INTERVAL 7 DAY);", "result": "total\n125450.50"}
+{"question": "查询库存数量小于10的产品名称", "sql": "SELECT product_name FROM products WHERE stock < 10;", "result": "product_name\nLaptop Model A\nMouse Wireless\nKeyboard Pro"}
+{"question": "查询销售额排名前5的销售员", "sql": "SELECT salesperson_name, total_sales FROM sales_summary ORDER BY total_sales DESC LIMIT 5;", "result": "salesperson_name,total_sales\nJohn Smith,85000\nMary Johnson,78000\nDavid Brown,72000\nSarah Wilson,69000\nMike Davis,65000"}
+{"question": "查询每月新注册用户数", "sql": "SELECT DATE_FORMAT(created_at, '%Y-%m') as month, COUNT(*) as new_users FROM users GROUP BY month ORDER BY month;", "result": "month,new_users\n2024-01,150\n2024-02,180\n2024-03,165"}
+{"question": "查询重复的邮箱地址", "sql": "SELECT email, COUNT(*) as count FROM users GROUP BY email HAVING count > 1;", "result": "email,count\ntest@example.com,2\nuser@domain.com,3"}
+{"question": "查询未完成的订单及其客户信息", "sql": "SELECT o.order_id, c.customer_name, o.order_date FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.status = 'pending';", "result": "order_id,customer_name,order_date\n1001,Alice Chen,2024-03-15\n1005,Bob Wang,2024-03-16"}
+{"question": "查询每个类别中价格最高的产品", "sql": "SELECT category, product_name, price FROM products p1 WHERE price = (SELECT MAX(price) FROM products p2 WHERE p2.category = p1.category);", "result": "category,product_name,price\nElectronics,Premium Laptop,2500.00\nClothing,Designer Jacket,299.99\nBooks,Technical Manual,89.95"}

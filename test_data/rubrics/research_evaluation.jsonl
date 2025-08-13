@@ -1,0 +1,6 @@
+{"criterion": "content_quality", "description": "内容质量和全面性", "weight": 0.2, "scale": "1-10", "details": "评估报告内容的全面性、相关性和准确性"}
+{"criterion": "technical_accuracy", "description": "技术准确性", "weight": 0.18, "scale": "1-10", "details": "评估技术描述的准确性和专业性"}
+{"criterion": "analysis_depth", "description": "分析深度", "weight": 0.2, "scale": "1-10", "details": "评估分析的深入程度和洞察力"}
+{"criterion": "practical_value", "description": "实用价值", "weight": 0.15, "scale": "1-10", "details": "评估报告的实际应用价值和指导意义"}
+{"criterion": "writing_quality", "description": "写作质量", "weight": 0.12, "scale": "1-10", "details": "评估文档结构、语言表达和可读性"}
+{"criterion": "completeness", "description": "完整性", "weight": 0.15, "scale": "1-10", "details": "评估报告是否覆盖了主题的主要方面"}

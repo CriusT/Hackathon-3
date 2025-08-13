@@ -1,0 +1,5 @@
+{"question": "分析人工智能在医疗诊断中的应用前景", "report_path": "test_data/reports/ai_medical_diagnosis.md", "rubrics_path": "test_data/rubrics/research_evaluation.jsonl", "model_score_path": "test_data/scores/ai_medical_model_score.json"}
+{"question": "评估区块链技术在金融服务中的风险与机遇", "report_path": "test_data/reports/blockchain_finance.md", "rubrics_path": "test_data/rubrics/technology_assessment.jsonl", "model_score_path": "test_data/scores/blockchain_model_score.json"}
+{"question": "研究气候变化对全球农业的影响及应对策略", "report_path": "test_data/reports/climate_agriculture.md", "rubrics_path": "test_data/rubrics/environmental_research.jsonl", "model_score_path": "test_data/scores/climate_model_score.json"}
+{"question": "分析远程工作对企业组织结构的长期影响", "report_path": "test_data/reports/remote_work_impact.md", "rubrics_path": "test_data/rubrics/business_analysis.jsonl", "model_score_path": "test_data/scores/remote_work_model_score.json"}
+{"question": "探讨量子计算在密码学领域的颠覆性影响", "report_path": "test_data/reports/quantum_cryptography.md", "rubrics_path": "test_data/rubrics/technology_research.jsonl", "model_score_path": "test_data/scores/quantum_model_score.json"}

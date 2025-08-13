@@ -1,0 +1,10 @@
+{"problem": "解方程 2x + 5 = 13", "answer": "x = 4", "pdf_path": "test_data/math_pdfs/algebra_basics.pdf", "difficulty": "easy"}
+{"problem": "计算积分 ∫(x² + 3x + 2)dx", "answer": "x³/3 + 3x²/2 + 2x + C", "pdf_path": "test_data/math_pdfs/calculus_integrals.pdf", "difficulty": "medium"}
+{"problem": "证明：对于任意正整数n，1 + 2 + ... + n = n(n+1)/2", "answer": "使用数学归纳法证明：基础步骤n=1时等式成立。假设n=k时成立，证明n=k+1时也成立。", "pdf_path": "test_data/math_pdfs/proof_techniques.pdf", "difficulty": "hard"}
+{"problem": "求函数 f(x) = x³ - 6x² + 9x + 1 的极值点", "answer": "f'(x) = 3x² - 12x + 9 = 0，解得 x = 1 或 x = 3。极大值点：x = 1，极小值点：x = 3", "pdf_path": "test_data/math_pdfs/derivatives.pdf", "difficulty": "medium"}
+{"problem": "解三角方程 sin(2x) = 1/2，其中 0 ≤ x ≤ 2π", "answer": "2x = π/6 + 2πk 或 2x = 5π/6 + 2πk，所以 x = π/12, 5π/12, 13π/12, 17π/12", "pdf_path": "test_data/math_pdfs/trigonometry.pdf", "difficulty": "medium"}
+{"problem": "计算矩阵乘法 [[1,2],[3,4]] × [[5,6],[7,8]]", "answer": "[[19,22],[43,50]]", "pdf_path": "test_data/math_pdfs/linear_algebra.pdf", "difficulty": "easy"}
+{"problem": "求数列 {1, 4, 7, 10, ...} 的第n项公式", "answer": "这是公差为3的等差数列，第n项公式为 aₙ = 3n - 2", "pdf_path": "test_data/math_pdfs/sequences.pdf", "difficulty": "easy"}
+{"problem": "计算复数 (3 + 4i) × (2 - i) 的值", "answer": "(3 + 4i)(2 - i) = 6 - 3i + 8i - 4i² = 6 + 5i + 4 = 10 + 5i", "pdf_path": "test_data/math_pdfs/complex_numbers.pdf", "difficulty": "medium"}
+{"problem": "使用洛必达法则求极限 lim(x→0) (sin x)/x", "answer": "原极限 = lim(x→0) (cos x)/1 = cos(0) = 1", "pdf_path": "test_data/math_pdfs/limits.pdf", "difficulty": "medium"}
+{"problem": "求曲线 y = x² 与 y = 4 - x² 所围成图形的面积", "answer": "两曲线交点为 (√2, 2) 和 (-√2, 2)，面积 = ∫[-√2,√2] (4-x²-x²)dx = ∫[-√2,√2] (4-2x²)dx = 16√2/3", "pdf_path": "test_data/math_pdfs/area_calculation.pdf", "difficulty": "hard"}
