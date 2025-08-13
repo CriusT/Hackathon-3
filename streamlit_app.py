@@ -197,7 +197,7 @@ class DatabaseManager:
         # 获取总数据量
         task = self.get_task(task_id)
         if not task or not task.get('data_path'):
-            return {'total': 0, 'completed': 0, 'progress': 0}
+            return {'total': 0, 'completed': 0, 'progress': 0, 'unsaved_indices': []}
         
         try:
             with open(task['data_path'], 'r', encoding='utf-8') as f:
@@ -205,13 +205,19 @@ class DatabaseManager:
         except:
             total = 0
         
-        # 获取已完成数量
+        # 获取已完成数量和已保存的索引
         cursor.execute('''
-            SELECT COUNT(*) FROM annotations 
+            SELECT data_index FROM annotations 
             WHERE task_id = ? AND annotator_id = ?
         ''', (task_id, 'user1'))
         
-        completed = cursor.fetchone()[0]
+        saved_indices = set(row[0] for row in cursor.fetchall())
+        completed = len(saved_indices)
+        
+        # 计算未保存的索引
+        all_indices = set(range(total))
+        unsaved_indices = sorted(list(all_indices - saved_indices))
+        
         conn.close()
         
         progress = (completed / total * 100) if total > 0 else 0
@@ -219,8 +225,23 @@ class DatabaseManager:
         return {
             'total': total,
             'completed': completed,
-            'progress': round(progress, 2)
+            'progress': round(progress, 2),
+            'unsaved_indices': unsaved_indices
         }
+    
+    def is_annotation_saved(self, task_id: str, data_index: int) -> bool:
+        """检查指定数据是否已保存标注"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id FROM annotations 
+            WHERE task_id = ? AND data_index = ? AND annotator_id = ?
+        ''', (task_id, data_index, 'user1'))
+        
+        result = cursor.fetchone() is not None
+        conn.close()
+        return result
 
 # 文件处理类
 class FileProcessor:
@@ -919,16 +940,33 @@ def annotation_page(db: DatabaseManager):
     
     # 进度显示
     progress = db.get_task_progress(task_id)
+    is_current_saved = db.is_annotation_saved(task_id, current_index)
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("当前进度", f"{current_index + 1}/{total_items}")
     with col2:
         st.metric("已完成", f"{progress['completed']}/{progress['total']}")
     with col3:
         st.metric("完成率", f"{progress['progress']:.1f}%")
+    with col4:
+        # 显示当前条目的保存状态
+        if is_current_saved:
+            st.success("✅ 已保存")
+        else:
+            st.warning("⚠️ 未保存")
     
     st.progress((current_index + 1) / total_items)
+    
+    # 显示未保存的条目提示
+    if progress['unsaved_indices']:
+        unsaved_count = len(progress['unsaved_indices'])
+        if unsaved_count <= 10:
+            unsaved_display = ', '.join([str(i+1) for i in progress['unsaved_indices']])
+            st.info(f"📋 还有 {unsaved_count} 条未保存: 第 {unsaved_display} 条")
+        else:
+            first_few = ', '.join([str(i+1) for i in progress['unsaved_indices'][:5]])
+            st.info(f"📋 还有 {unsaved_count} 条未保存: 第 {first_few} 条等...")
     
     # 任务说明
     annotation_config = task['config']['annotation_config']
@@ -1010,13 +1048,38 @@ def annotation_page(db: DatabaseManager):
             st.rerun()
     
     with col2:
-        if st.button("💾 保存标注", type="primary"):
+        save_button = st.button("💾 保存标注", type="primary")
+        if save_button:
             try:
                 db.save_annotation(task_id, current_index, annotation_result)
-                st.success("标注已保存")
+                # 使用session state来显示保存成功消息
+                st.session_state[f'save_message_{task_id}_{current_index}'] = {
+                    'type': 'success',
+                    'message': f"✅ 第 {current_index + 1} 条标注已保存！",
+                    'timestamp': pd.Timestamp.now()
+                }
                 st.rerun()
             except Exception as e:
-                st.error(f"保存失败: {e}")
+                st.session_state[f'save_message_{task_id}_{current_index}'] = {
+                    'type': 'error', 
+                    'message': f"❌ 保存失败: {e}",
+                    'timestamp': pd.Timestamp.now()
+                }
+                st.rerun()
+        
+        # 显示保存状态消息
+        save_msg_key = f'save_message_{task_id}_{current_index}'
+        if save_msg_key in st.session_state:
+            msg_data = st.session_state[save_msg_key]
+            # 检查消息是否是最近3秒内的
+            if (pd.Timestamp.now() - msg_data['timestamp']).total_seconds() < 3:
+                if msg_data['type'] == 'success':
+                    st.success(msg_data['message'])
+                else:
+                    st.error(msg_data['message'])
+            else:
+                # 清理过期的消息
+                del st.session_state[save_msg_key]
     
     with col3:
         if st.button("➡️ 下一条", disabled=current_index >= total_items - 1):
@@ -1024,17 +1087,46 @@ def annotation_page(db: DatabaseManager):
             st.rerun()
     
     with col4:
+        st.write("**快速跳转**")
         # 跳转功能
         jump_to = st.number_input(
-            "跳转到",
+            "跳转到第几条",
             min_value=1,
             max_value=total_items,
             value=current_index + 1,
             key=f"jump_{task_id}"
         )
-        if st.button("🎯 跳转"):
-            st.session_state[f'current_index_{task_id}'] = jump_to - 1
-            st.rerun()
+        
+        col4_1, col4_2 = st.columns(2)
+        with col4_1:
+            if st.button("🎯 跳转", key=f"jump_btn_{task_id}"):
+                st.session_state[f'current_index_{task_id}'] = jump_to - 1
+                st.rerun()
+        
+        with col4_2:
+            # 跳转到下一个未保存的条目
+            if progress['unsaved_indices'] and st.button("📝 未保存", key=f"next_unsaved_{task_id}"):
+                # 找到当前位置之后的第一个未保存条目
+                next_unsaved = None
+                for idx in progress['unsaved_indices']:
+                    if idx > current_index:
+                        next_unsaved = idx
+                        break
+                
+                # 如果没有找到后面的，就跳转到第一个未保存的
+                if next_unsaved is None and progress['unsaved_indices']:
+                    next_unsaved = progress['unsaved_indices'][0]
+                
+                if next_unsaved is not None:
+                    st.session_state[f'current_index_{task_id}'] = next_unsaved
+                    st.session_state[f'jump_message_{task_id}'] = f"已跳转到未保存的第 {next_unsaved + 1} 条"
+                    st.rerun()
+        
+        # 显示跳转消息
+        jump_msg_key = f'jump_message_{task_id}'
+        if jump_msg_key in st.session_state:
+            st.info(st.session_state[jump_msg_key])
+            del st.session_state[jump_msg_key]
 
 def progress_page(db: DatabaseManager):
     """进度管理页面"""
@@ -1081,6 +1173,17 @@ def progress_page(db: DatabaseManager):
                 if progress['total'] > 0:
                     st.progress(progress['progress'] / 100)
                     st.write(f"标注进度: {progress['completed']}/{progress['total']}")
+                    
+                    # 显示未保存的条目
+                    if progress['unsaved_indices']:
+                        unsaved_count = len(progress['unsaved_indices'])
+                        if unsaved_count <= 5:
+                            unsaved_display = ', '.join([str(i+1) for i in progress['unsaved_indices']])
+                            st.warning(f"⚠️ 未保存: 第 {unsaved_display} 条")
+                        else:
+                            st.warning(f"⚠️ 还有 {unsaved_count} 条未保存")
+                    else:
+                        st.success("✅ 所有条目已保存")
                 else:
                     st.write("暂无数据")
             
