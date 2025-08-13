@@ -13,6 +13,8 @@ from datetime import datetime
 import uuid
 from typing import Dict, List, Any, Optional
 import os
+import hashlib
+import hmac
 
 # 页面配置
 st.set_page_config(
@@ -21,6 +23,149 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# 常量配置
+PUBLISHER_INVITE_CODE = "qijizhifeng"
+
+# 认证工具函数
+def hash_password(password: str) -> str:
+    """对密码进行哈希处理"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, hashed: str) -> bool:
+    """验证密码"""
+    return hash_password(password) == hashed
+
+def check_authentication():
+    """检查用户是否已登录"""
+    if 'user' not in st.session_state:
+        return False
+    return True
+
+def require_authentication():
+    """要求用户登录，如果未登录则显示登录页面"""
+    if not check_authentication():
+        show_auth_page()
+        return False
+    return True
+
+def is_publisher():
+    """检查当前用户是否为发布者"""
+    return check_authentication() and st.session_state.user.get('role') == 'publisher'
+
+def is_annotator():
+    """检查当前用户是否为标注者"""
+    return check_authentication() and st.session_state.user.get('role') == 'annotator'
+
+def show_auth_page():
+    """显示登录/注册页面"""
+    st.title("🔐 数据标注平台")
+    
+    tab1, tab2 = st.tabs(["登录", "注册"])
+    
+    with tab1:
+        show_login_form()
+    
+    with tab2:
+        show_register_form()
+
+def show_login_form():
+    """显示登录表单"""
+    st.subheader("用户登录")
+    
+    with st.form("login_form"):
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        submit = st.form_submit_button("登录", type="primary")
+        
+        if submit:
+            if not username or not password:
+                st.error("请填写用户名和密码")
+                return
+            
+            db = DatabaseManager()
+            password_hash = hash_password(password)
+            user = db.authenticate_user(username, password_hash)
+            
+            if user:
+                st.session_state.user = user
+                st.success(f"欢迎回来，{user['full_name'] or user['username']}！")
+                st.rerun()
+            else:
+                st.error("用户名或密码错误")
+
+def show_register_form():
+    """显示注册表单"""
+    st.subheader("用户注册")
+    
+    with st.form("register_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            username = st.text_input("用户名*", help="请输入唯一的用户名")
+            password = st.text_input("密码*", type="password")
+            confirm_password = st.text_input("确认密码*", type="password")
+        
+        with col2:
+            full_name = st.text_input("姓名*")
+            email = st.text_input("邮箱")
+            invite_code = st.text_input("发布者邀请码", help="如有邀请码可注册为发布者，否则注册为标注者")
+        
+        submit = st.form_submit_button("注册", type="primary")
+        
+        if submit:
+            # 验证表单
+            if not username or not password or not full_name:
+                st.error("请填写所有必填项（*）")
+                return
+            
+            if password != confirm_password:
+                st.error("两次输入的密码不一致")
+                return
+            
+            if len(password) < 6:
+                st.error("密码长度至少6位")
+                return
+            
+            # 确定用户角色
+            role = 'publisher' if invite_code == PUBLISHER_INVITE_CODE else 'annotator'
+            
+            # 检查用户名是否已存在
+            db = DatabaseManager()
+            existing_user = db.get_user_by_username(username)
+            if existing_user:
+                st.error("用户名已存在，请选择其他用户名")
+                return
+            
+            # 创建用户
+            try:
+                user_data = {
+                    'username': username,
+                    'password_hash': hash_password(password),
+                    'full_name': full_name,
+                    'email': email,
+                    'role': role
+                }
+                
+                user_id = db.create_user(user_data)
+                
+                role_text = "发布者" if role == 'publisher' else "标注者"
+                st.success(f"注册成功！您已注册为{role_text}账户。请使用用户名和密码登录。")
+                
+                # 自动登录
+                user = db.authenticate_user(username, hash_password(password))
+                if user:
+                    st.session_state.user = user
+                    st.rerun()
+                    
+            except Exception as e:
+                st.error(f"注册失败: {str(e)}")
+
+def logout():
+    """登出用户"""
+    if 'user' in st.session_state:
+        del st.session_state.user
+    st.rerun()
 
 # 数据库初始化
 def init_database():
@@ -56,13 +201,69 @@ def init_database():
         )
     ''')
     
-    # 创建用户表
+    # 创建用户表 - 先检查是否已存在
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    users_table_exists = cursor.fetchone() is not None
+    
+    if not users_table_exists:
+        # 创建新的用户表
+        cursor.execute('''
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                email TEXT UNIQUE,
+                role TEXT DEFAULT 'annotator',
+                full_name TEXT,
+                is_active BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        ''')
+    else:
+        # 检查并添加缺失的列
+        try:
+            cursor.execute("SELECT full_name FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # full_name 列不存在，添加它
+            cursor.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+        
+        try:
+            cursor.execute("SELECT password_hash FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # password_hash 列不存在，添加它
+            cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        
+        try:
+            cursor.execute("SELECT email FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # email 列不存在，添加它
+            cursor.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        
+        try:
+            cursor.execute("SELECT is_active FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # is_active 列不存在，添加它
+            cursor.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1")
+        
+        try:
+            cursor.execute("SELECT last_login FROM users LIMIT 1")
+        except sqlite3.OperationalError:
+            # last_login 列不存在，添加它
+            cursor.execute("ALTER TABLE users ADD COLUMN last_login TIMESTAMP")
+    
+    # 创建任务分配表
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS task_assignments (
             id TEXT PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            role TEXT DEFAULT 'annotator',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            task_id TEXT NOT NULL,
+            assigned_to TEXT NOT NULL,
+            assigned_by TEXT NOT NULL,
+            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'assigned',
+            FOREIGN KEY (task_id) REFERENCES tasks (id),
+            FOREIGN KEY (assigned_to) REFERENCES users (id),
+            FOREIGN KEY (assigned_by) REFERENCES users (id)
         )
     ''')
     
@@ -242,6 +443,208 @@ class DatabaseManager:
         result = cursor.fetchone() is not None
         conn.close()
         return result
+    
+    # 用户管理相关方法
+    def create_user(self, user_data: Dict) -> str:
+        """创建新用户"""
+        user_id = str(uuid.uuid4())
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO users (id, username, password_hash, email, role, full_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            user_data['username'],
+            user_data['password_hash'],
+            user_data.get('email', ''),
+            user_data.get('role', 'annotator'),
+            user_data.get('full_name', '')
+        ))
+        
+        conn.commit()
+        conn.close()
+        return user_id
+    
+    def authenticate_user(self, username: str, password_hash: str) -> Optional[Dict]:
+        """验证用户登录"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT id, username, role, full_name, email
+                FROM users 
+                WHERE username = ? AND password_hash = ? AND is_active = 1
+            ''', (username, password_hash))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'id': row[0],
+                    'username': row[1],
+                    'role': row[2],
+                    'full_name': row[3] if row[3] else '',
+                    'email': row[4] if row[4] else ''
+                }
+            return None
+        except sqlite3.OperationalError as e:
+            conn.close()
+            # 如果遇到列不存在的错误，说明数据库结构不兼容
+            if "no such column" in str(e):
+                st.error("数据库结构需要更新，请重启应用或联系管理员")
+            return None
+    
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """根据用户名获取用户信息"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT id, username, role, full_name, email, created_at
+                FROM users 
+                WHERE username = ? AND is_active = 1
+            ''', (username,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'id': row[0],
+                    'username': row[1],
+                    'role': row[2] if row[2] else 'annotator',
+                    'full_name': row[3] if row[3] else '',
+                    'email': row[4] if row[4] else '',
+                    'created_at': row[5]
+                }
+            return None
+        except sqlite3.OperationalError as e:
+            conn.close()
+            if "no such column" in str(e):
+                # 尝试使用旧版本的查询
+                conn = self.get_connection()
+                cursor = conn.cursor()
+                cursor.execute('SELECT id, username, role, created_at FROM users WHERE username = ?', (username,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    return {
+                        'id': row[0],
+                        'username': row[1],
+                        'role': row[2] if row[2] else 'annotator',
+                        'full_name': '',
+                        'email': '',
+                        'created_at': row[3]
+                    }
+            return None
+    
+    def get_all_annotators(self) -> List[Dict]:
+        """获取所有标注者用户"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, username, full_name, email, created_at
+            FROM users 
+            WHERE role = 'annotator' AND is_active = 1
+            ORDER BY created_at DESC
+        ''')
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        annotators = []
+        for row in rows:
+            annotators.append({
+                'id': row[0],
+                'username': row[1],
+                'full_name': row[2],
+                'email': row[3],
+                'created_at': row[4]
+            })
+        return annotators
+    
+    def assign_task(self, task_id: str, assigned_to: str, assigned_by: str) -> str:
+        """分配任务给标注者"""
+        assignment_id = str(uuid.uuid4())
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # 删除旧的分配记录
+        cursor.execute('DELETE FROM task_assignments WHERE task_id = ?', (task_id,))
+        
+        # 创建新的分配记录
+        cursor.execute('''
+            INSERT INTO task_assignments (id, task_id, assigned_to, assigned_by)
+            VALUES (?, ?, ?, ?)
+        ''', (assignment_id, task_id, assigned_to, assigned_by))
+        
+        conn.commit()
+        conn.close()
+        return assignment_id
+    
+    def get_task_assignment(self, task_id: str) -> Optional[Dict]:
+        """获取任务分配信息"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT ta.assigned_to, ta.assigned_by, ta.assigned_at, 
+                   u1.username as assigned_to_username, u1.full_name as assigned_to_name,
+                   u2.username as assigned_by_username, u2.full_name as assigned_by_name
+            FROM task_assignments ta
+            JOIN users u1 ON ta.assigned_to = u1.id
+            JOIN users u2 ON ta.assigned_by = u2.id
+            WHERE ta.task_id = ?
+        ''', (task_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'assigned_to': row[0],
+                'assigned_by': row[1],
+                'assigned_at': row[2],
+                'assigned_to_username': row[3],
+                'assigned_to_name': row[4],
+                'assigned_by_username': row[5],
+                'assigned_by_name': row[6]
+            }
+        return None
+    
+    def get_user_assigned_tasks(self, user_id: str) -> List[Dict]:
+        """获取分配给用户的任务"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT t.id, t.name, t.description, t.status, t.created_at, ta.assigned_at
+            FROM tasks t
+            JOIN task_assignments ta ON t.id = ta.task_id
+            WHERE ta.assigned_to = ?
+            ORDER BY ta.assigned_at DESC
+        ''', (user_id,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        tasks = []
+        for row in rows:
+            tasks.append({
+                'id': row[0],
+                'name': row[1],
+                'description': row[2],
+                'status': row[3],
+                'created_at': row[4],
+                'assigned_at': row[5]
+            })
+        return tasks
 
 # 文件处理类
 class FileProcessor:
@@ -389,23 +792,257 @@ def main():
     init_database()
     db = DatabaseManager()
     
-    # 侧边栏导航
-    st.sidebar.title("📝 数据标注平台")
-    page = st.sidebar.selectbox(
-        "选择功能",
-        ["🏠 首页", "⚙️ 任务配置", "📝 数据标注", "📊 进度管理", "📤 结果导出"]
-    )
+    # 检查认证状态
+    if not require_authentication():
+        return
     
-    if page == "🏠 首页":
-        home_page(db)
-    elif page == "⚙️ 任务配置":
-        task_config_page(db)
-    elif page == "📝 数据标注":
-        annotation_page(db)
-    elif page == "📊 进度管理":
-        progress_page(db)
-    elif page == "📤 结果导出":
-        export_page(db)
+    # 显示用户信息和导航
+    user = st.session_state.user
+    
+    # 侧边栏用户信息
+    st.sidebar.title("📝 数据标注平台")
+    
+    with st.sidebar:
+        st.write(f"👤 **{user['full_name']}** ({user['username']})")
+        role_emoji = "👨‍💼" if user['role'] == 'publisher' else "👨‍💻"
+        role_text = "发布者" if user['role'] == 'publisher' else "标注者"
+        st.write(f"{role_emoji} {role_text}")
+        
+        if st.button("🚪 退出登录"):
+            logout()
+        
+        st.divider()
+    
+    # 根据用户角色显示不同的导航选项
+    if user['role'] == 'publisher':
+        # 发布者界面
+        page = st.sidebar.selectbox(
+            "选择功能",
+            ["🏠 首页", "⚙️ 任务配置", "📝 数据标注", "📊 进度管理", "📤 结果导出", "👥 任务分配"]
+        )
+        
+        if page == "🏠 首页":
+            home_page(db)
+        elif page == "⚙️ 任务配置":
+            task_config_page(db)
+        elif page == "📝 数据标注":
+            annotation_page(db)
+        elif page == "📊 进度管理":
+            progress_page(db)
+        elif page == "📤 结果导出":
+            export_page(db)
+        elif page == "👥 任务分配":
+            task_assignment_page(db)
+    
+    else:
+        # 标注者界面（只能看到分配给自己的任务）
+        page = st.sidebar.selectbox(
+            "选择功能",
+            ["🏠 我的任务", "📝 数据标注", "📊 我的进度"]
+        )
+        
+        if page == "🏠 我的任务":
+            annotator_home_page(db)
+        elif page == "📝 数据标注":
+            annotation_page(db, annotator_view=True)
+        elif page == "📊 我的进度":
+            annotator_progress_page(db)
+
+def task_assignment_page(db: DatabaseManager):
+    """任务分配页面（仅发布者可见）"""
+    st.title("👥 任务分配管理")
+    
+    # 获取所有任务和标注者
+    tasks = db.get_all_tasks()
+    annotators = db.get_all_annotators()
+    
+    if not tasks:
+        st.warning("暂无任务，请先创建任务")
+        return
+    
+    if not annotators:
+        st.warning("暂无标注者用户，请等待标注者注册")
+        return
+    
+    st.subheader("📋 任务分配")
+    
+    # 选择任务
+    task_options = {f"{task['name']} (ID: {task['id'][:8]})": task['id'] for task in tasks}
+    selected_task_name = st.selectbox("选择要分配的任务", list(task_options.keys()))
+    
+    if selected_task_name:
+        task_id = task_options[selected_task_name]
+        task = next(t for t in tasks if t['id'] == task_id)
+        
+        # 显示任务信息
+        st.write(f"**任务名称**: {task['name']}")
+        st.write(f"**任务描述**: {task['description']}")
+        
+        # 显示当前分配状态
+        current_assignment = db.get_task_assignment(task_id)
+        if current_assignment:
+            st.info(f"📌 当前分配给: **{current_assignment['assigned_to_name']}** (@{current_assignment['assigned_to_username']})")
+            st.write(f"分配时间: {current_assignment['assigned_at']}")
+            st.write(f"分配人: {current_assignment['assigned_by_name']}")
+        else:
+            st.warning("⚠️ 该任务尚未分配给任何标注者")
+        
+        st.divider()
+        
+        # 分配/重新分配
+        st.subheader("🎯 分配任务")
+        
+        # 标注者选择
+        annotator_options = {f"{ann['full_name']} (@{ann['username']})": ann['id'] for ann in annotators}
+        selected_annotator_name = st.selectbox("选择标注者", list(annotator_options.keys()))
+        
+        if selected_annotator_name and st.button("📤 分配任务", type="primary"):
+            selected_annotator_id = annotator_options[selected_annotator_name]
+            current_user_id = st.session_state.user['id']
+            
+            try:
+                assignment_id = db.assign_task(task_id, selected_annotator_id, current_user_id)
+                
+                selected_annotator = next(ann for ann in annotators if ann['id'] == selected_annotator_id)
+                st.success(f"✅ 任务已成功分配给 **{selected_annotator['full_name']}** (@{selected_annotator['username']})")
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"分配失败: {str(e)}")
+    
+    st.divider()
+    
+    # 显示所有任务的分配状态
+    st.subheader("📊 所有任务分配状态")
+    
+    for task in tasks:
+        assignment = db.get_task_assignment(task['id'])
+        progress = db.get_task_progress(task['id'])
+        
+        with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.write(f"**描述**: {task['description']}")
+                st.write(f"**创建时间**: {task['created_at']}")
+                st.write(f"**数据量**: {progress['total']} 条")
+                st.write(f"**完成情况**: {progress['completed']}/{progress['total']} ({progress['progress']:.1f}%)")
+                
+                if assignment:
+                    st.success(f"✅ 已分配给: **{assignment['assigned_to_name']}** (@{assignment['assigned_to_username']})")
+                    st.write(f"分配时间: {assignment['assigned_at']}")
+                else:
+                    st.warning("⚠️ 未分配")
+            
+            with col2:
+                if progress['total'] > 0:
+                    st.progress(progress['progress'] / 100)
+
+def annotator_home_page(db: DatabaseManager):
+    """标注者首页"""
+    st.title("🏠 我的标注任务")
+    
+    user_id = st.session_state.user['id']
+    assigned_tasks = db.get_user_assigned_tasks(user_id)
+    
+    if not assigned_tasks:
+        st.info("📭 您目前没有被分配任何标注任务，请联系发布者分配任务。")
+        return
+    
+    st.write(f"您共有 **{len(assigned_tasks)}** 个分配的任务")
+    
+    for task in assigned_tasks:
+        progress = db.get_task_progress(task['id'])
+        
+        with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.write(f"**描述**: {task['description']}")
+                st.write(f"**分配时间**: {task['assigned_at']}")
+                st.write(f"**标注进度**: {progress['completed']}/{progress['total']}")
+                
+                if progress['unsaved_indices']:
+                    unsaved_count = len(progress['unsaved_indices'])
+                    st.warning(f"⚠️ 还有 {unsaved_count} 条未保存")
+                else:
+                    st.success("✅ 所有条目已保存")
+            
+            with col2:
+                if progress['total'] > 0:
+                    st.progress(progress['progress'] / 100)
+                
+                if st.button(f"📝 开始标注", key=f"start_{task['id']}"):
+                    st.session_state['selected_task_id'] = task['id']
+                    st.switch_page("annotation")
+
+def annotator_progress_page(db: DatabaseManager):
+    """标注者进度页面"""
+    st.title("📊 我的标注进度")
+    
+    user_id = st.session_state.user['id']
+    assigned_tasks = db.get_user_assigned_tasks(user_id)
+    
+    if not assigned_tasks:
+        st.info("您目前没有被分配任何标注任务")
+        return
+    
+    # 总体统计
+    total_tasks = len(assigned_tasks)
+    completed_tasks = 0
+    total_items = 0
+    completed_items = 0
+    
+    for task in assigned_tasks:
+        progress = db.get_task_progress(task['id'])
+        total_items += progress['total']
+        completed_items += progress['completed']
+        if progress['progress'] >= 100:
+            completed_tasks += 1
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("分配任务", total_tasks)
+    with col2:
+        st.metric("完成任务", completed_tasks)
+    with col3:
+        st.metric("总数据量", total_items)
+    with col4:
+        st.metric("已标注", completed_items)
+    
+    if total_items > 0:
+        overall_progress = (completed_items / total_items) * 100
+        st.progress(overall_progress / 100)
+        st.write(f"总体完成率: {overall_progress:.1f}%")
+    
+    st.divider()
+    
+    # 详细任务进度
+    st.subheader("📋 详细任务进度")
+    
+    for task in assigned_tasks:
+        progress = db.get_task_progress(task['id'])
+        
+        with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
+            st.write(f"**描述**: {task['description']}")
+            st.write(f"**分配时间**: {task['assigned_at']}")
+            
+            if progress['total'] > 0:
+                st.progress(progress['progress'] / 100)
+                st.write(f"标注进度: {progress['completed']}/{progress['total']}")
+                
+                if progress['unsaved_indices']:
+                    unsaved_count = len(progress['unsaved_indices'])
+                    if unsaved_count <= 5:
+                        unsaved_display = ', '.join([str(i+1) for i in progress['unsaved_indices']])
+                        st.warning(f"⚠️ 未保存: 第 {unsaved_display} 条")
+                    else:
+                        st.warning(f"⚠️ 还有 {unsaved_count} 条未保存")
+                else:
+                    st.success("✅ 所有条目已保存")
+            else:
+                st.write("暂无数据")
 
 def home_page(db: DatabaseManager):
     """首页"""
@@ -889,16 +1526,26 @@ def confirm_task_step(db: DatabaseManager):
             except Exception as e:
                 st.error(f"创建任务失败: {str(e)}")
 
-def annotation_page(db: DatabaseManager):
+def annotation_page(db: DatabaseManager, annotator_view=False):
     """标注页面"""
     st.title("📝 数据标注")
     
-    # 任务选择
-    tasks = db.get_all_tasks()
+    user = st.session_state.user
     
-    if not tasks:
-        st.warning("暂无可标注的任务，请先创建任务")
-        return
+    # 根据用户角色获取任务列表
+    if annotator_view or user['role'] == 'annotator':
+        # 标注者只能看到分配给自己的任务
+        assigned_tasks = db.get_user_assigned_tasks(user['id'])
+        if not assigned_tasks:
+            st.warning("您暂无分配的标注任务，请联系发布者分配任务")
+            return
+        tasks = assigned_tasks
+    else:
+        # 发布者可以看到所有任务
+        tasks = db.get_all_tasks()
+        if not tasks:
+            st.warning("暂无可标注的任务，请先创建任务")
+            return
     
     # 任务选择器
     task_options = {f"{task['name']} (ID: {task['id'][:8]})": task['id'] for task in tasks}
@@ -1161,14 +1808,27 @@ def progress_page(db: DatabaseManager):
     
     for task in tasks:
         progress = db.get_task_progress(task['id'])
+        assignment = db.get_task_assignment(task['id'])
         
-        with st.expander(f"📝 {task['name']} - {progress['progress']:.1f}% 完成"):
+        # 标题包含分配信息
+        title = f"📝 {task['name']} - {progress['progress']:.1f}% 完成"
+        if assignment:
+            title += f" (👤 {assignment['assigned_to_name']})"
+        
+        with st.expander(title):
             col1, col2 = st.columns([2, 1])
             
             with col1:
                 st.write(f"**描述**: {task['description']}")
                 st.write(f"**创建时间**: {task['created_at']}")
                 st.write(f"**状态**: {task['status']}")
+                
+                # 显示分配信息
+                if assignment:
+                    st.success(f"✅ 已分配给: **{assignment['assigned_to_name']}** (@{assignment['assigned_to_username']})")
+                    st.write(f"分配时间: {assignment['assigned_at']}")
+                else:
+                    st.warning("⚠️ 该任务尚未分配给任何标注者")
                 
                 if progress['total'] > 0:
                     st.progress(progress['progress'] / 100)
